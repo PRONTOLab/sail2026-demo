@@ -1,0 +1,28 @@
+diff --git a/ext/ComradeReactantExt/sample.jl b/ext/ComradeReactantExt/sample.jl
+index 5a17bbb..8e0092e 100644
+--- a/ext/ComradeReactantExt/sample.jl
++++ b/ext/ComradeReactantExt/sample.jl
+@@ -161,7 +161,7 @@ end
+ # argument so one compiled kernel serves every chunk of a given length.
+ function _compile_warmup_kernel(state, ldf, tpost, nsteps::Int, total::Int, sampler::ReactantNUTS)
+     fn = function (st::ProbProg.MCMCState, lf, off)
+-        _, _, _, st_out = ProbProg._infer(
++        _, _, _, _, st_out = ProbProg._infer(
+             st, lf, tpost;
+             algorithm = :NUTS, num_warmup = nsteps, num_samples = 0,
+             adapt_step_size = true, adapt_mass_matrix = true,
+@@ -326,12 +326,12 @@ function sample_chunked(
+             Reactant.Compiler.compile(run_chunk, (state, ns); optimize = :probprog)
+         end
+         t = @elapsed begin
+-            samples, diagnostics, _, state = cfn(state, ns)
++            samples, diagnostics, _, _, state = cfn(state, ns)
+         end
+ 
+         raw = Array(samples)
+         chain = [transform(tpost, r) for r in eachrow(raw)]
+-        numerical_error = .!Array(diagnostics)   # diagnostics: true == NO divergence
++        numerical_error = map(>(0), Array(diagnostics)[:, 2])
+ 
+         # Persist the chunk first (serialization / accumulation), then build the callback
+         # `info` and fire the callback — the same ordering the AdvancedHMC path uses.
