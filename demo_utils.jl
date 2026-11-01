@@ -1,9 +1,11 @@
+include(joinpath(@__DIR__, "ocean.jl"))
 include(joinpath(@__DIR__, "model.jl"))
 include(joinpath(@__DIR__, "primates.jl"))
 
 using Optimisers, CairoMakie, Statistics, Printf, Serialization, Random
 using Reactant: ProbProg
 using .Primates
+using .Ocean
 
 CairoMakie.activate!(; type = "png", px_per_unit = 1.5)
 
@@ -22,12 +24,17 @@ end
 """Run `f` on the CPU and compiled for the GPU; print both times and both answers."""
 function cpu_vs_gpu(f, x, x_gpu)
     f_gpu = @compile sync = true f(x_gpu)
-    @printf "CPU: %8.2f ms   answer %.6g\n" 1e3 * median_time(f, x) f(x)
-    @printf "GPU: %8.2f ms   answer %.6g\n" 1e3 * median_time(f_gpu, x_gpu) Float64(f_gpu(x_gpu))
+    tcpu, tgpu = median_time(f, x), median_time(f_gpu, x_gpu)
+    @printf "CPU: %8.2f ms   answer %.6g\n" 1e3 * tcpu f(x)
+    @printf "GPU: %8.2f ms   answer %.6g\n" 1e3 * tgpu Float64(f_gpu(x_gpu))
+    @printf "one added line: %s× faster, same answer\n" round(Int, tcpu / tgpu)
     return nothing
 end
 
 const QUIET = Ref(false)
+
+"""Oceananigans on Reactant: a warm/cold front breaking into eddies, one frame per 50 time steps."""
+ocean_eddies!(; frames = 36) = run_ocean!(frame!; frames)
 
 function frame!(fig)
     QUIET[] && (Makie.colorbuffer(fig); return nothing)
@@ -39,6 +46,7 @@ end
 """Render every live figure once off screen, so plotting code is compiled before the talk."""
 function warm_plots!()
     QUIET[] = true
+    run_ocean!(frame!; frames = 0)
     heat_spread!(; every = HEAT_STEPS)
     Makie.colorbuffer(heat_reveal(unblur!(; steps = 30, every = 30)))
     xb = fit!(; steps = 10, every = 10)
@@ -79,7 +87,7 @@ const X_START = prior_sample(StableRNG(42), tpost)
 const COMPILED = Dict{Symbol, Any}()
 
 # ---------------------------------------------------------------------------
-# Enzyme: work backwards through a heat simulation
+# Enzyme: run loop-style simulation code backwards
 # ---------------------------------------------------------------------------
 
 const HEAT_N = 64
@@ -100,45 +108,50 @@ function word_image(word; n = HEAT_N, scale = 4)
     return img
 end
 
-"""Heat spreading on a plate: `HEAT_STEPS` explicit time steps of the 2-D heat equation."""
-function simulate(u, L)
-    for _ in 1:HEAT_STEPS
-        u = u .+ 0.2 .* (L * u .+ u * L)
+"""Heat spreading on a plate, written the way simulation codes are written: a border of
+zeros, two buffers, and loops over time steps and grid points that update arrays in place."""
+function simulate!(u, unew, steps = HEAT_STEPS)
+    for step in 1:steps
+        for j in 2:HEAT_N+1, i in 2:HEAT_N+1
+            unew[i, j] = u[i, j] + 0.2 * (u[i-1, j] + u[i+1, j] + u[i, j-1] + u[i, j+1] - 4u[i, j])
+        end
+        u, unew = unew, u
     end
     return u
 end
 
-edge_penalty(u) = sum(sqrt.((u[2:end, :] .- u[1:end-1, :]) .^ 2 .+ 1.0e-6)) +
-    sum(sqrt.((u[:, 2:end] .- u[:, 1:end-1]) .^ 2 .+ 1.0e-6))
-heat_loss(u0, L, obs) = sum(abs2, simulate(u0, L) .- obs) + HEAT_LAMBDA * edge_penalty(u0)
-
-heat_gradient(u0, L, obs) = Enzyme.gradient(Enzyme.Reverse, Const(heat_loss), u0, Const(L), Const(obs))[1]
-
-const HEAT_SIM_TIME = Ref(NaN)
-
-"""Time one simulation and one gradient on the GPU, and the cost of the same information
-without gradients (one extra simulation per unknown)."""
-function gradient_vs_rerun()
-    u0, L, obs = (Reactant.to_rarray(a) for a in (zeros(HEAT_N, HEAT_N), HEAT_L, HEAT_OBS))
-    tsim = median_time(COMPILED[:heat_sim], u0, L)
-    tgrad = median_time(COMPILED[:heat_grad], u0, L, obs)
-    HEAT_SIM_TIME[] = tsim
-    n = HEAT_N^2
-    @printf "one simulation (%d time steps):            %6.2f ms\n" HEAT_STEPS 1e3 * tsim
-    @printf "with Enzyme, one gradient (all %d):      %6.2f ms  (about %.0f simulations)\n" n 1e3 * tgrad tgrad / tsim
-    @printf "without gradients, %d simulations:      %6.0f ms\n" n + 1 1e3 * (n + 1) * tsim
-    return nothing
+function plate_after(u0, steps)
+    u, unew = zeros(HEAT_N + 2, HEAT_N + 2), zeros(HEAT_N + 2, HEAT_N + 2)
+    u[2:HEAT_N+1, 2:HEAT_N+1] .= u0
+    return simulate!(u, unew, steps)[2:HEAT_N+1, 2:HEAT_N+1]
 end
 
-function heat_step(opt_state, u0, L, obs)
-    res = Enzyme.gradient(Enzyme.ReverseWithPrimal, Const(heat_loss), u0, Const(L), Const(obs))
-    opt_state, u0 = Optimisers.update!(opt_state, u0, res.derivs[1])
-    return opt_state, u0, res.val
+function edge_penalty(x)
+    s = 0.0
+    for j in 1:HEAT_N, i in 1:HEAT_N
+        i < HEAT_N && (s += sqrt((x[i+1, j] - x[i, j])^2 + 1.0e-6))
+        j < HEAT_N && (s += sqrt((x[i, j+1] - x[i, j])^2 + 1.0e-6))
+    end
+    return s
 end
 
-const HEAT_L = Matrix(SymTridiagonal(fill(-2.0, HEAT_N), fill(1.0, HEAT_N - 1)))
+"""How far the plate simulated from the guess `u0` is from what we observe, plus a
+preference for sharp edges."""
+function mismatch(u0, observed)
+    u, unew = zeros(HEAT_N + 2, HEAT_N + 2), zeros(HEAT_N + 2, HEAT_N + 2)
+    u[2:HEAT_N+1, 2:HEAT_N+1] .= u0
+    v = simulate!(u, unew)
+    s = 0.0
+    for j in 1:HEAT_N, i in 1:HEAT_N
+        s += (v[i+1, j+1] - observed[i, j])^2
+    end
+    return s + HEAT_LAMBDA * edge_penalty(u0)
+end
+
+heat_gradient(u0) = Enzyme.gradient(Enzyme.Reverse, mismatch, u0, Const(HEAT_OBS))[1]
+
 const HEAT_TRUTH = word_image("AI")
-const HEAT_OBS = simulate(HEAT_TRUTH, HEAT_L) .+ 0.01 .* randn(StableRNG(7), HEAT_N, HEAT_N)
+const HEAT_OBS = plate_after(HEAT_TRUTH, HEAT_STEPS) .+ 0.01 .* randn(StableRNG(7), HEAT_N, HEAT_N)
 
 function field_axis(pos; title = "")
     ax = Axis(pos; title, titlesize = 18, aspect = 1, yreversed = true)
@@ -148,34 +161,28 @@ end
 fieldplot!(ax, u::AbstractMatrix; kw...) = heatmap!(ax, permutedims(u); colormap = :inferno, kw...)
 fieldplot!(ax, u::Observable; kw...) = heatmap!(ax, lift(permutedims, u); colormap = :inferno, kw...)
 
-"""Show the hidden pattern spreading out, frame by frame (plain Julia on the CPU)."""
+"""Show the hidden pattern spreading out, frame by frame."""
 function heat_spread!(; every = 10)
-    u = copy(HEAT_TRUTH)
-    obs = Observable(u)
+    obs = Observable(copy(HEAT_TRUTH))
     fig = Figure(; size = (520, 560))
     ax = field_axis(fig[1, 1]; title = "time step 0")
     fieldplot!(ax, obs; colorrange = (0, 1))
     frame!(fig)
-    for k in 1:HEAT_STEPS
-        u = u .+ 0.2 .* (HEAT_L * u .+ u * HEAT_L)
-        if k % every == 0
-            obs[] = u
-            ax.title = "time step $k"
-            frame!(fig)
-            sleep(0.15)
-        end
+    for k in every:every:HEAT_STEPS
+        obs[] = plate_after(HEAT_TRUTH, k)
+        ax.title = "time step $k"
+        frame!(fig)
+        sleep(0.15)
     end
     return nothing
 end
 
 """Recover the hidden starting pattern from the blurred observation by gradient descent
-through the whole simulation, redrawing every `every` steps."""
+through the whole loop simulation (Enzyme on the CPU), redrawing every `every` steps."""
 function unblur!(; steps = 600, every = 30)
-    u0 = Reactant.to_rarray(zeros(HEAT_N, HEAT_N))
-    opt_state = COMPILED[:heat_setup](Optimisers.Adam(0.05), u0)
-    step_r = COMPILED[:heat_step]
-    Lr, obsr = Reactant.to_rarray(HEAT_L), Reactant.to_rarray(HEAT_OBS)
-    rec = Observable(zeros(HEAT_N, HEAT_N))
+    u0 = zeros(HEAT_N, HEAT_N)
+    opt_state = Optimisers.setup(Optimisers.Adam(0.05), u0)
+    rec = Observable(copy(u0))
     fig = Figure(; size = (1000, 540))
     fieldplot!(field_axis(fig[1, 1]; title = "what we observe"), HEAT_OBS)
     ax = field_axis(fig[1, 2]; title = "recovered starting pattern: step 0")
@@ -183,19 +190,20 @@ function unblur!(; steps = 600, every = 30)
     frame!(fig)
     t = 0.0
     for i in 1:steps
-        t += @elapsed (opt_state, u0, _) = step_r(opt_state, u0, Lr, obsr)
+        t += @elapsed opt_state, u0 = Optimisers.update!(opt_state, u0, heat_gradient(u0))
         if i % every == 0 || i == steps
-            rec[] = Array(u0)
+            rec[] = copy(u0)
             ax.title = "recovered starting pattern: step $i"
             frame!(fig)
         end
     end
     if !QUIET[]
-        @printf "%d improvement steps with Enzyme gradients: %.1f s\n" steps t
-        nsim = steps * (HEAT_N^2 + 1)
-        isnan(HEAT_SIM_TIME[]) || @printf "without gradients: %.1f million simulations, about %.0f minutes\n" nsim / 1e6 nsim * HEAT_SIM_TIME[] / 60
+        tsim = median([@elapsed(mismatch(u0, HEAT_OBS)) for _ in 1:20])
+        tgrad = median([@elapsed(heat_gradient(u0)) for _ in 1:20])
+        @printf "%d gradients through all %d time steps of the loops: %.1f s on one CPU core\n" steps HEAT_STEPS t
+        @printf "each gradient costs about as much as %.1f runs of the simulation\n" tgrad / tsim
     end
-    return Array(u0)
+    return u0
 end
 
 function heat_reveal(rec)
@@ -216,13 +224,8 @@ function prepare_demo!()
     opt_state = COMPILED[:setup](Optimisers.AdamW(FIT_LR), xo)
     COMPILED[:step] = @compile sync = true opt_step(opt_state, tpostr, xo)
 
-    u0 = Reactant.to_rarray(zeros(HEAT_N, HEAT_N))
-    COMPILED[:heat_setup] = @compile Optimisers.setup(Optimisers.Adam(0.05), u0)
-    hs = COMPILED[:heat_setup](Optimisers.Adam(0.05), u0)
-    Lr, obsr = Reactant.to_rarray(HEAT_L), Reactant.to_rarray(HEAT_OBS)
-    COMPILED[:heat_step] = @compile sync = true heat_step(hs, u0, Lr, obsr)
-    COMPILED[:heat_sim] = @compile sync = true simulate(u0, Lr)
-    COMPILED[:heat_grad] = @compile sync = true heat_gradient(u0, Lr, obsr)
+    heat_gradient(zeros(HEAT_N, HEAT_N))
+    prepare_ocean!()
 
     if !isfile(WARM_STATE)
         xbest = fit!(; steps = 5000, every = 0)

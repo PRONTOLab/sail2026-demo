@@ -79,6 +79,8 @@ Pkg.add([
     PackageSpec(name = "Enzyme", version = "0.13.216"),
     PackageSpec(name = "Optimisers", version = "0.4.11"),
     PackageSpec(name = "CairoMakie", version = "0.15.16"),
+    PackageSpec(name = "Oceananigans", version = "0.116.1"),
+    PackageSpec(name = "CUDA", version = "6.2.2"),
     PackageSpec(name = "JSON"),
 ])
 step("packages resolved")
