@@ -82,6 +82,8 @@ Pkg.add([
     PackageSpec(name = "Oceananigans", version = "0.116.1"),
     PackageSpec(name = "CUDA", version = "6.2.2"),
     PackageSpec(name = "JSON"),
+    PackageSpec(url = "https://github.com/PRONTOLab/SkyMatch.jl.git",
+        rev = "58f20ad7c0f5061dfe990f856406eaedc00aa1ac"),
 ])
 step("packages resolved")
 include(joinpath(DEMO_DIR, "cuda_libs.jl"))

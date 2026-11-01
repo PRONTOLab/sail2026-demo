@@ -1,11 +1,13 @@
 include(joinpath(@__DIR__, "ocean.jl"))
 include(joinpath(@__DIR__, "model.jl"))
 include(joinpath(@__DIR__, "primates.jl"))
+include(joinpath(@__DIR__, "skymatch.jl"))
 
 using Optimisers, CairoMakie, Statistics, Printf, Serialization, Random
 using Reactant: ProbProg
 using .Primates
 using .Ocean
+using .SkyMatchDemo
 
 CairoMakie.activate!(; type = "png", px_per_unit = 1.5)
 
@@ -49,6 +51,7 @@ function warm_plots!()
     run_ocean!(frame!; frames = 0)
     heat_spread!(; every = HEAT_STEPS)
     Makie.colorbuffer(heat_reveal(unblur!(; steps = 30, every = 30)))
+    Makie.colorbuffer(show_skymatch())
     xb = fit!(; steps = 10, every = 10)
     imgs = sample_live!(; nchunks = 1)
     Makie.colorbuffer(show_draws(imgs))
@@ -226,6 +229,7 @@ function prepare_demo!()
 
     heat_gradient(zeros(HEAT_N, HEAT_N))
     prepare_ocean!()
+    prepare_skymatch!()
 
     if !isfile(WARM_STATE)
         xbest = fit!(; steps = 5000, every = 0)

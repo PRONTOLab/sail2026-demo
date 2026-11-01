@@ -6,6 +6,7 @@
 |---|---|
 | Reactant | ordinary Julia code compiled for the GPU with one line; the Oceananigans ocean model compiled by changing one word, live; scaling to supercomputers (GB-25) |
 | Enzyme | the gradient of a whole simulation with one line; recovering a hidden pattern by working backwards through a heat simulation |
+| SkyMatch | infrared luminosities of synthetic galaxies and their response to star-formation scatter, differentiated with Enzyme |
 | Black hole | imaging M87* from 2017 Event Horizon Telescope data with [Comrade.jl](https://github.com/ptiede/Comrade.jl) |
 | Impulse | Bayesian uncertainty for the black hole; a textbook model (McElreath's *Statistical Rethinking*, m14.10) that Impulse's compiler makes about 20× faster without any rewriting |
 
@@ -25,5 +26,6 @@ The setup (`colab/colab_setup.jl`) installs:
 ## Files
 
 - `demo_utils.jl`: setup and helpers for the live cells; `model.jl`: the Comrade M87 model (Comrade's StokesIImaging tutorial); `primates.jl`: the m14.10 model compiled with Impulse optimizations off and on; `ocean.jl`: Oceananigans' baroclinic adjustment on `ReactantState()` with the GB-25 time-stepping recipe; `cuda_libs.jl`: links cuDNN/NVRTC/NCCL from the `Reactant_jll` artifact next to the prebuilt library.
+- `skymatch.jl`: a small CPU galaxy-luminosity and sensitivity example using the pinned SkyMatch package; no external catalog or SED tables needed.
 - `data/`: M87 2017 visibilities (from Comrade's examples) and the 151-species primate data.
 - `runs/demo_research/warm_state.jls`: the black-hole sampler's saved tuning state, so setup skips the warm-up.
